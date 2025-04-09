@@ -1,0 +1,155 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Helper functions
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+    
+    function isOwner(userId) {
+      return isAuthenticated() && request.auth.uid == userId;
+    }
+    
+    function hasRole(role) {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.roles.hasAny([role]);
+    }
+
+    function isAdmin() {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'administrateur';
+    }
+
+    function isEmployee() {
+      return isAuthenticated() && 
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role == 'employé';
+    }
+
+    function isDriverOfCarpooling(carpoolingId) {
+      let carpooling = get(/databases/$(database)/documents/covoiturages/$(carpoolingId)).data;
+      return carpooling != null && carpooling.driver_id == request.auth.uid;
+    }
+
+    function isPassengerOfCarpooling(carpoolingId) {
+      let carpooling = get(/databases/$(database)/documents/covoiturages/$(carpoolingId)).data;
+      return carpooling != null && carpooling.passagers_id.hasAny([request.auth.uid]);
+    }
+
+    // Users collection
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == userId;
+      allow update: if isOwner(userId) || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Credit collection
+    match /credit/{userId} {
+      allow read: if isOwner(userId) || isAdmin() || isEmployee();
+      allow create: if isAdmin();
+      allow update: if isAdmin() || isEmployee() || isOwner(userId) || (
+        isAuthenticated() && (
+          // Allow drivers to update credits when completing trips
+          (exists(/databases/$(database)/documents/covoiturages/$(request.resource.data.covoiturage_id)) &&
+           isDriverOfCarpooling(request.resource.data.covoiturage_id)) ||
+          // Allow passengers to update their credits
+          isPassengerOfCarpooling(request.resource.data.covoiturage_id)
+        )
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Special system documents
+    match /credit/application {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isEmployee() || (
+        isAuthenticated() && (
+          // Allow drivers and passengers to update application credits
+          exists(/databases/$(database)/documents/covoiturages/$(request.resource.data.covoiturage_id)) &&
+          (
+            isDriverOfCarpooling(request.resource.data.covoiturage_id) ||
+            isPassengerOfCarpooling(request.resource.data.covoiturage_id)
+          )
+        )
+      );
+    }
+
+    match /credit/Attente {
+      allow read: if isAuthenticated();
+      allow write: if isAdmin() || isEmployee() || (
+        isAuthenticated() && (
+          // Allow drivers and passengers to update waiting credits
+          exists(/databases/$(database)/documents/covoiturages/$(request.resource.data.covoiturage_id)) &&
+          (
+            isDriverOfCarpooling(request.resource.data.covoiturage_id) ||
+            isPassengerOfCarpooling(request.resource.data.covoiturage_id)
+          )
+        )
+      );
+    }
+
+    // Vehicles collection
+    match /vehicules/{vehicleId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && hasRole('chauffeur');
+      allow update, delete: if isAuthenticated() && 
+        resource.data.user_id == request.auth.uid;
+    }
+
+    // Carpoolings collection
+    match /covoiturages/{carpoolingId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && hasRole('chauffeur');
+      allow update: if isAuthenticated() && (
+        resource.data.driver_id == request.auth.uid ||
+        (resource.data.passagers_id.hasAny([request.auth.uid]) &&
+         request.resource.data.diff(resource.data).affectedKeys()
+         .hasOnly(['passagers_id', 'statut', 'date_modification']))
+      );
+      allow delete: if isAuthenticated() && 
+        resource.data.driver_id == request.auth.uid;
+    }
+
+    // Validations collection
+    match /validations/{validationId} {
+      allow read: if isAuthenticated() && (
+        resource.data.passager_id == request.auth.uid ||
+        resource.data.chauffeur_id == request.auth.uid ||
+        isEmployee() ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && (
+        // Allow drivers to create validations for their passengers
+        (exists(/databases/$(database)/documents/covoiturages/$(request.resource.data.covoiturage_id)) &&
+         get(/databases/$(database)/documents/covoiturages/$(request.resource.data.covoiturage_id)).data.driver_id == request.auth.uid) ||
+        // Allow passengers to create validations
+        request.resource.data.passager_id == request.auth.uid ||
+        isEmployee() ||
+        isAdmin()
+      );
+      allow update: if isAuthenticated() && (
+        resource.data.passager_id == request.auth.uid ||
+        resource.data.chauffeur_id == request.auth.uid ||
+        isEmployee() ||
+        isAdmin()
+      );
+      allow delete: if isAdmin();
+    }
+
+    // Reviews collection
+    match /note/{reviewId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && 
+        request.resource.data.passager_id == request.auth.uid;
+      allow update: if isEmployee() || isAdmin();
+      allow delete: if isAdmin();
+    }
+
+    // Administration collection
+    match /administration/{logId} {
+      allow read: if isAdmin() || isEmployee();
+      allow create: if isAdmin() || isEmployee();
+      allow update, delete: if isAdmin();
+    }
+  }
+}
